@@ -1089,8 +1089,13 @@ class DeepseekV2MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
         if config.topk_method == "noaux_tc":
+            # fp32: GLM-5.2 ships this bias with a ~34.44 common offset on a
+            # per-expert std of 0.138, and one bf16 ULP at that magnitude is
+            # 0.134 -- bf16 collapses its 174 distinct values to 3. Kept fp32 so
+            # the aiter kernel, which dispatches on gating_output.dtype() and
+            # reinterpret_casts the bias to the same type, also reads it as fp32.
             self.gate.e_score_correction_bias = atom_parameter(
-                torch.empty(config.n_routed_experts)
+                torch.empty(config.n_routed_experts, dtype=torch.float32)
             )
         else:
             self.gate.e_score_correction_bias = None
@@ -1153,7 +1158,16 @@ class DeepseekV2MoE(nn.Module):
             compilation_config.static_forward_context[prefix] = self
 
     def routed_expert_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        router_logits = self.gate(hidden_states)
+        # Router scoring in fp32. The weights stay bf16 (widening is exact, so
+        # the products are identical to a bf16 GEMM with fp32 accumulation); what
+        # this buys is an fp32 *output* instead of one rounded back to bf16.
+        # Downstream that also makes biased_grouped_topk dispatch on float, so
+        # sigmoid, the top-k compare and the correction bias are all fp32.
+        if getattr(self, "_gate_w_f32", None) is None:
+            self._gate_w_f32 = self.gate.weight.detach().float()
+        router_logits = torch.nn.functional.linear(
+            hidden_states.float(), self._gate_w_f32
+        )
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
