@@ -42,6 +42,7 @@ if (
         mxfp4_quant,
     )
     from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+    from aiter.ops.triton.utils._triton.arch_info import get_arch
     from aiter.ops.triton.moe.quant_moe import downcast_to_static_fp8
     from aiter.ops.triton.moe.quant_moe import downcast_to_mxfp
 
@@ -73,16 +74,25 @@ def _swizzle_mxfp4(
     w2_triton_layout = w2.transpose(-2, -1)
     w2_scale_triton_layout = w2_scale.transpose(-2, -1)
 
+    # gfx1250 workaround: shuffle_scale_moe() picks the layout from the *arch*
+    # (GFX1250_SCALE), but these scales are consumed by moe_gemm_a4w4 /
+    # moe_gemm_a16w4, which only decode CDNA4_SCALE (or unswizzled). Handing
+    # them a GFX1250_SCALE tensor makes the kernel address a packed tensor with
+    # unpacked offsets -> GPU page fault. GFX1250_SCALE exists for the gluon
+    # moe_gemm_a8w4 kernel, which is a different consumer. Verified: the CDNA4
+    # layout is decoded correctly by moe_gemm_a4w4 on gfx1250.
+    scale_arch = "gfx950" if get_arch() == "gfx1250" else None
+
     if N_1 % 32 == 0 and K_1 % (32 * 8) == 0:
         w1_scale_triton_layout, w1_swizzle_layout = shuffle_scale_moe(
-            w1_scale_triton_layout, return_layout=True
+            w1_scale_triton_layout, arch=scale_arch, return_layout=True
         )
     else:
         w1_swizzle_layout = None
 
     if N_2 % 32 == 0 and K_2 % (32 * 8) == 0:
         w2_scale_triton_layout, w2_swizzle_layout = shuffle_scale_moe(
-            w2_scale_triton_layout, return_layout=True
+            w2_scale_triton_layout, arch=scale_arch, return_layout=True
         )
     else:
         w2_swizzle_layout = None
