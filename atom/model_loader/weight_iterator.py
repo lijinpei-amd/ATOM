@@ -244,8 +244,15 @@ def safetensors_weights_iterator(
             model_name_or_path, None, ["*.safetensors"], ignore_patterns=["original/*"]
         )
     )
+    # sorted(): glob() returns readdir order, which on ext4 is effectively
+    # random. The checkpoint is laid out so each fused MoE parameter's experts
+    # occupy 4-5 CONSECUTIVE shards; reading out of order means every layer's
+    # staging buffer opens early and none completes until the end, so peak host
+    # staging is 4 x num_moe_layers buffers instead of ~3 layers' worth.
     hf_weights_files = filter_duplicate_safetensors_files(
-        glob(os.path.join(path, "*.safetensors")), path, SAFE_WEIGHTS_INDEX_NAME
+        sorted(glob(os.path.join(path, "*.safetensors"))),
+        path,
+        SAFE_WEIGHTS_INDEX_NAME,
     )
     hf_weights_files = _shards_worth_reading(hf_weights_files, wants)
     enable_tqdm = (
