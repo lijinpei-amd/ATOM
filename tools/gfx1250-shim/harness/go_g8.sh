@@ -2,8 +2,10 @@
 # Generalized gsm8k arm runner.
 #  $1 GPU  $2 fewshot  $3 shuffle_kv  $4 triton_sparse_mla  $5 prefix_caching(on|off)
 #  $6 limit  $7 logname
-cd /home/jinpli/workspace/glm52
-source ./env_triton.sh
+: "${GLM_WORK:=/home/jinpli/workspace/glm52}"
+: "${GLM_MODEL:=/home/jinpli/workspace/models/GLM-5.2-MXFP4}"
+cd "$GLM_WORK"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_triton.sh"
 # A GPU fault with the model resident dumps ~445 GB (all of VRAM) and can fill
 # the disk. Belt and braces: rlimit, the HSA switch, and a /dev/null pattern.
 ulimit -c 0 2>/dev/null || true
@@ -35,7 +37,7 @@ if [ "${8:-0}" = "1" ]; then export GLM_SPARSE_DECODE=1; fi
 LIMIT=$6; LOG=$7
 echo "ARM gpu=$1 fewshot=$FEWSHOT shufkv=$3 tritonsparse=$4 pc=$5 limit=$LIMIT" > logs/$LOG
 timeout 14400 python3 run_gsm8k.py \
-  --model /home/jinpli/workspace/models/GLM-5.2-MXFP4 \
+  --model "$GLM_MODEL" \
   ${EAGER:+--enforce-eager} ${ONLY:+--only $ONLY} --chunk ${CHUNK:-0} --limit $LIMIT --num-fewshot $FEWSHOT --gen-tokens 256 --dump $PWD/${LOG%.log}.jsonl \
   -tp 1 --level 0 --cudagraph-mode NONE $PC \
   --block-size 64 --max-model-len 4096 --max-num-batched-tokens ${MAXBT:-4096} \

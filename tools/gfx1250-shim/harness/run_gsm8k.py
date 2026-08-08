@@ -18,7 +18,11 @@ try:
 except ModuleNotFoundError:          # older ATOM: same flags, plain parser
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-GSM = "/data/huggingface-cache/hub/datasets--openai--gsm8k/snapshots/*/main/%s-00000-of-00001.parquet"
+GSM = os.environ.get(
+    "GSM8K_GLOB",
+    "/data/huggingface-cache/hub/datasets--openai--gsm8k/snapshots/"
+    "*/main/%s-00000-of-00001.parquet",
+)
 _ORIG_IDX = None
 NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 

@@ -18,8 +18,14 @@ export ATOM_LOG_MORE=1
 
 # gfx1250 kernel-discovery shim (prefer triton, log missing CK/HIP kernels)
 export GFX1250_SHIM=1
-export GFX1250_SHIM_LOG=/home/jinpli/workspace/glm52/logs/missing_kernels.jsonl
-export PYTHONPATH=/home/jinpli/workspace/glm52/shim${PYTHONPATH:+:$PYTHONPATH}
+# Paths are overridable; the defaults reproduce the bringup boxes.
+#   GLM_SHIM_DIR : directory holding sitecustomize.py (defaults to this repo copy)
+#   GLM_WORK     : scratch/log dir
+: "${GLM_SHIM_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+: "${GLM_WORK:=/home/jinpli/workspace/glm52}"
+mkdir -p "$GLM_WORK/logs" 2>/dev/null || true
+export GFX1250_SHIM_LOG=$GLM_WORK/logs/missing_kernels.jsonl
+export PYTHONPATH=$GLM_SHIM_DIR${PYTHONPATH:+:$PYTHONPATH}
 
 # Disable ATOM's CK/HIP fused kernels (no gfx1250 build) to fall back to the
 # unfused triton/torch paths. Each of these is a "missing kernel" in its own right.
