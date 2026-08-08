@@ -59,7 +59,7 @@ GEMMs, mxfp4 quant, causal_conv1d) from the CK/HIP default to aiter Triton.
 | --- | --- | --- |
 | `GLM_TRITON_SPARSE_MLA` | off | sparse-MLA prefill via `unified_attention_sparse_mla` instead of the torch reference. Should be on. |
 | `GLM_ORDERED_TOPK` | **1** | DSA top-k ordered by (score desc, token asc). `torch.topk` breaks ties arbitrarily and its choice moves with tensor shape, which made the selected order depend on batch composition. |
-| `GLM_TRITON_A16W16` | off | bf16 GEMMs via the gfx1250 Gluon `gemm_a16w16` instead of falling through `tuned_gemm` to `F.linear` -> hipBLASLt Tensile. Measured on the full gsm8k set: 15-shot TTFT -12.2%, TPOT -8.8%; accuracy unchanged (1233/1319 both ways). Left off by default pending the determinism note below. |
+| `GLM_TRITON_A16W16` | **1** | bf16 GEMMs via the gfx1250 Gluon `gemm_a16w16` instead of falling through `tuned_gemm` to `F.linear` -> hipBLASLt Tensile. Measured on the full gsm8k set: 15-shot TTFT -12.2%, TPOT -8.8%; accuracy unchanged (1233/1319 both ways). On by default. Note the determinism caveat below. |
 | `GLM_A16W16_MINFLOP` | 5e9 | work-size gate for the above. Not arbitrary: the Gluon path has a ~76 us fixed floor and Tensile runs ~70 TF/s, so they cross at ~5.3e9 FLOPs. |
 | `GLM_MQA_TAIL` | off | **obsolete.** Repaired the window tail that gfx1250's gluon `fp8_mqa_logits` skipped; fixed properly in aiter (`kv_pos_post`, commit dd408f6f2), after which it repairs 0 columns. |
 | `GLM_FQK_TRITON` | off | fused qk-rope/cache via Triton |
@@ -79,9 +79,11 @@ They cost nothing when unset but are the bulk of the file's size.
   attention reader mishandles the shuffled KV layout: 15-shot gsm8k returns pure
   token garbage (0/12), deterministically, while 5-shot (dense path) is fine.
   `env_triton.sh` defaults this to 1. Use `shuffle_kv=0`.
-* **`GLM_TRITON_A16W16` costs determinism.** With it on, an A/A pair (identical
-  config, repeated) diverged on 4 of 60 questions where the baseline diverges on
-  0-1. Full-set accuracy is unaffected.
+* **`GLM_TRITON_A16W16` costs determinism, and is on by default.** An A/A pair
+  (identical config, repeated) diverged on 4 of 60 questions where the baseline
+  diverges on 0-1. Full-set accuracy is unaffected (1238/1319 and 1233/1319,
+  matching Tensile exactly). Set `GLM_TRITON_A16W16=0` when bit-reproducibility
+  matters more than the ~10% long-context speedup.
 * **Rare run-level nondeterminism at `max_num_seqs >= 2`**, independent of this
   shim and of the aiter fixes: ~3 of 8 repeats perturb one question. seqs=1 is
   bit-reproducible.

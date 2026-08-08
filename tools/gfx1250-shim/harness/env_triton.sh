@@ -21,7 +21,18 @@ export GFX1250_SHIM=1
 # Paths are overridable; the defaults reproduce the bringup boxes.
 #   GLM_SHIM_DIR : directory holding sitecustomize.py (defaults to this repo copy)
 #   GLM_WORK     : scratch/log dir
-: "${GLM_SHIM_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Pick the first candidate that actually holds sitecustomize.py: the repo copy
+# next to this script, then a shim/ beside the work dir (legacy layout).
+if [ -z "${GLM_SHIM_DIR:-}" ]; then
+  _here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  for _c in "$_here/.." "$_here/../gfx1250-shim" "${GLM_WORK:-$PWD}/shim" "$PWD/shim"; do
+    if [ -f "$_c/sitecustomize.py" ]; then GLM_SHIM_DIR=$(cd "$_c" && pwd); break; fi
+  done
+fi
+if [ ! -f "${GLM_SHIM_DIR:-}/sitecustomize.py" ]; then
+  echo "env_triton.sh: cannot locate sitecustomize.py; set GLM_SHIM_DIR" >&2
+  return 1 2>/dev/null || exit 1
+fi
 : "${GLM_WORK:=/home/jinpli/workspace/glm52}"
 mkdir -p "$GLM_WORK/logs" 2>/dev/null || true
 export GFX1250_SHIM_LOG=$GLM_WORK/logs/missing_kernels.jsonl
