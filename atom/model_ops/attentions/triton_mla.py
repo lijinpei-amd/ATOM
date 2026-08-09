@@ -64,9 +64,17 @@ class TritonMLAMetadataBuilder(AiterMLAMetadataBuilder):
         self.model_runner.forward_vars.update(triton_mla_buffers)
 
     def set_mla_persistent_worker_buffers(
-        self, bs, max_q_len, only_update=False, num_reject_tokens=None
+        self,
+        bs,
+        max_q_len,
+        only_update=False,
+        num_reject_tokens=None,
+        sparse_decode=False,
+        is_cp_round_robin=False,
     ):
-        # Triton MLA does not use aiter persistent worker buffers
+        # Triton MLA does not use aiter persistent worker buffers. The trailing
+        # arguments exist only to track the base signature; the cudagraph-capture
+        # path passes is_cp_round_robin= by keyword.
         return {}
 
     def prepare_decode(self, batch: ScheduledBatch, bs: int):
