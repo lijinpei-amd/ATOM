@@ -53,16 +53,45 @@ reimplementations:
 Plus ~38 module-level redirects (rmsnorm, layernorm, rope, gemm_a8w8, batched
 GEMMs, mxfp4 quant, causal_conv1d) from the CK/HIP default to aiter Triton.
 
+### How much of that is live
+
+Measured with `GLM_COVERAGE` over a 5-shot (dense) and a 15-shot (sparse) run,
+both 4/4: **15 of the ~55 patched ops are ever called.** In descending call
+count -- `rmsnorm2d_fwd`, `rmsnorm2d_fwd_with_add`,
+`rope_cached_positions_2c_fwd_inplace`, `layernorm2d_fwd`,
+`dynamic_per_token_scaled_quant`, `indexer_k_quant_and_cache`,
+`top_k_per_row_decode`, `mixed_sample_outer_exponential`,
+`concat_and_cache_mla`, `flash_attn_varlen_func`,
+`cp_gather_indexer_k_quant_cache`, `top_k_per_row_prefill`, `silu_and_mul`,
+`get_mla_metadata_v1`, and `mla_prefill_asm_fwd` on the sparse path only.
+
+`concat_and_cache_mla` and `flash_attn_varlen_func` land on exactly 78 calls =
+one per layer, and only in the 5-shot arm: they are the dense path.
+
+Everything else -- the rope backward/THD variants, batched GEMMs, `gemm_a8w8`,
+`causal_conv1d`, `mhc_post`, `flash_attn_func`, the `*_smoothquant` and
+`*_dynamicquant` norms, `greedy_sample` -- is never reached by this model.
+
+All 15 are load-bearing: building each CK/HIP peer directly fails on gfx1250 with
+the same CK-tile arch gate (`config.hpp:577`; the supported list ends at
+gfx1201). The one near-miss is `module_rmsnorm`, which is hand-written HIP rather
+than CK-tile and does compile -- but `_use_hip_common()` dispatches to
+`add_rmsnorm` in `module_rmsnorm_quant`, which is CK-tile, so it is unreachable.
+
+Load-bearing lines: roughly 670 of 4,956 -- 1-66, `_make_custom_impls` (68-508),
+`_build_triton_index` (511-543), `_patch_aiter` (588-667), and the import hook
+(803-851). The remainder is the diagnostic block below plus the flags above.
+
 ## Production flags
 
 | env | default | effect |
 | --- | --- | --- |
-| `GLM_TRITON_SPARSE_MLA` | off | sparse-MLA prefill via `unified_attention_sparse_mla` instead of the torch reference. Should be on. |
+| `GLM_TRITON_SPARSE_MLA` | off | sparse-MLA prefill via `unified_attention_sparse_mla` instead of the torch reference. Should be on, but it is perf, not correctness: with it off the torch reference scored the same 4/4 at 18.9 s vs 12.6 s. |
 | `GLM_ORDERED_TOPK` | **1** | DSA top-k ordered by (score desc, token asc). `torch.topk` breaks ties arbitrarily and its choice moves with tensor shape, which made the selected order depend on batch composition. |
 | `GLM_TRITON_A16W16` | **1** | bf16 GEMMs via the gfx1250 Gluon `gemm_a16w16` instead of falling through `tuned_gemm` to `F.linear` -> hipBLASLt Tensile. Measured on the full gsm8k set: 15-shot TTFT -12.2%, TPOT -8.8%; accuracy unchanged (1233/1319 both ways). On by default. Note the determinism caveat below. |
 | `GLM_A16W16_MINFLOP` | 5e9 | work-size gate for the above. Not arbitrary: the Gluon path has a ~76 us fixed floor and Tensile runs ~70 TF/s, so they cross at ~5.3e9 FLOPs. |
 | `GLM_MQA_TAIL` | off | **obsolete.** Repaired the window tail that gfx1250's gluon `fp8_mqa_logits` skipped; fixed properly in aiter (`kv_pos_post`, commit dd408f6f2), after which it repairs 0 columns. |
-| `GLM_FQK_TRITON` | off | fused qk-rope/cache via Triton |
+| `GLM_FQK_TRITON` | off | fused qk-rope/cache via Triton. `harness/go_g8.sh` sets it to 1. Not required -- with it off the run completes (3/4 vs 4/4 at n=4, inside the known run-to-run noise), so it changes numerics rather than blocking. |
 
 ## Diagnostic flags -- delete these in cleanup
 
@@ -70,6 +99,14 @@ Everything below is investigation scaffolding, all env-gated and inert by
 default: `GLM_KVW*`, `GLM_DETTAP`, `GLM_DETKERN`, `GLM_IDX_CHECK`, `GLM_MQA_IN`,
 `GLM_MQA_CU`, `GLM_MQA_COUNT`, `GLM_ATTNTAP`, `GLM_LAYERTAP`, `GLM_TSM_DIFF`,
 `GLM_PCTAP`, `GLM_MOETAP`, `GLM_KVWATCH`, `GLM_NO_GLUON_MQA`.
+
+Two are worth keeping past cleanup, since they answer questions about *this*
+file rather than about a past bug:
+
+| env | what it answers |
+| --- | --- |
+| `GLM_COVERAGE=<path>` | which replacements the model actually calls. One JSONL record per process at exit; sum the `hits` maps. Produced the table above. |
+| `GLM_WHICH_IMPL=1` | which MoE GEMM and MX scale layout are live. Prints once on the first call. |
 
 They cost nothing when unset but are the bulk of the file's size.
 

@@ -65,6 +65,55 @@ _ALIASES = {
 }
 
 
+# --------------------------------------------------------------------------
+# GLM_COVERAGE=<path>: which replacements does the model actually call?
+#
+# The shim patches everything it can find a peer for; that is a much larger set
+# than the model touches. Wrapping the table at the one point where it is
+# assembled separates the two: one 4-question run showed 15 of ~55 live, and
+# nothing else.
+#
+# Caveat: a later _install_* block that rebinds the same name shadows the
+# wrapper, so its op reads as 0 calls. GLM_TRITON_SPARSE_MLA does this to
+# mla_prefill_asm_fwd -- cross-check against the "[tsm]" stderr lines.
+#
+# Each process appends one JSON record at exit; sum "hits" across them.
+# --------------------------------------------------------------------------
+_COV = os.environ.get("GLM_COVERAGE")
+_COV_HITS = {}
+_COV_ORIGIN = {}
+
+
+def _cov_wrap(op, impl):
+    import functools
+
+    def w(*a, **kw):
+        _COV_HITS[op] = _COV_HITS.get(op, 0) + 1
+        return impl(*a, **kw)
+
+    try:
+        functools.update_wrapper(w, impl)
+    except Exception:
+        pass
+    return w
+
+
+def _cov_dump():
+    import json
+    if not _COV_HITS and not _COV_ORIGIN:
+        return
+    rec = {"pid": os.getpid(),
+           "hits": _COV_HITS,
+           "origin": _COV_ORIGIN}
+    with open(_COV, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
+if _COV:
+    import atexit
+    atexit.register(_cov_dump)
+
+
 def _make_custom_impls():
     """Hand-written triton adapters for ops whose triton peer differs in layout.
 
@@ -628,6 +677,10 @@ def _patch_aiter(aiter_mod):
             redirected.append({"op": op, "from": "custom", "to": "shim adapter"})
     except Exception as exc:
         _emit({"event": "custom_impls_failed", "error": repr(exc)})
+
+    if _COV:
+        replacements = {op: _cov_wrap(op, impl) for op, impl in replacements.items()}
+        _COV_ORIGIN.update({r["op"]: r["from"] for r in redirected})
 
     # Rebind across every already-imported aiter module, not just the package
     # top level: aiter's own internals call these by module-global name (e.g.
@@ -4954,3 +5007,73 @@ if _A16W16:
         "[a16w16] SUMMARY triton=%d torch=%d fallback_errors=%d (pid %d)"
         % (_AW["tri"], _AW["torch"], _AW["err"], os.getpid()),
         file=sys.stderr, flush=True))
+
+
+# --------------------------------------------------------------------------
+# GLM_WHICH_IMPL=1 -- one-shot report of the live MoE GEMM and its scale layout.
+#
+# Which kernel the MoE lands on is decided by config (act_quant), and the scale
+# layout by arch, so static reading gives two answers that have to agree. This
+# prints the pair on the first call. On GLM-5.2 it reports
+#   GEMM=moe_gemm_a4w4 swizzle_mx_scale='CDNA4_SCALE' x.dtype=torch.uint8
+# i.e. the gfx950 layout on gfx1250 hardware, which is what the scale_arch pin
+# in fused_moe_triton.py exists to produce.
+# --------------------------------------------------------------------------
+_WHICHIMPL = os.environ.get("GLM_WHICH_IMPL") == "1"
+_WI = {"done": set()}
+
+
+def _install_whichimpl(mod):
+    import sys as _s
+    ds = _s.modules.get("atom.model_ops.fused_moe_triton")
+    if ds is None:
+        return
+    for nm in ("moe_gemm_a4w4", "moe_gemm_a16w4"):
+        fn = getattr(ds, nm, None)
+        if fn is None or getattr(fn, "_wi", False):
+            continue
+
+        def mk(orig, name=nm):
+            def w(*a, **kw):
+                if name not in _WI["done"]:
+                    _WI["done"].add(name)
+                    sw = kw.get("swizzle_mx_scale")
+                    x = a[0] if a else None
+                    print("[whichimpl] GEMM=%s swizzle_mx_scale=%r x.dtype=%s "
+                          "out_dtype=%r" % (name, sw,
+                                            getattr(x, "dtype", "?"),
+                                            kw.get("out_dtype")),
+                          file=_s.stderr, flush=True)
+                return orig(*a, **kw)
+            w._wi = True
+            return w
+        setattr(ds, nm, mk(fn))
+    sh = _s.modules.get("aiter.ops.triton.utils.shuffle")
+    if sh is not None and not getattr(sh.shuffle_scale_moe, "_wi", False):
+        o = sh.shuffle_scale_moe
+
+        def w2(*a, **kw):
+            r = o(*a, **kw)
+            if "shuffle" not in _WI["done"]:
+                _WI["done"].add("shuffle")
+                lab = r[1] if isinstance(r, tuple) and len(r) > 1 else None
+                print("[whichimpl] shuffle_scale_moe(arch=%r) -> layout=%r"
+                      % (kw.get("arch"), lab), file=_s.stderr, flush=True)
+            return r
+        w2._wi = True
+        sh.shuffle_scale_moe = w2
+    print("[whichimpl] installed", file=_s.stderr, flush=True)
+
+
+if _WHICHIMPL:
+    _prev_wi = _HOOKS.get("atom.model_ops.fused_moe_triton")
+
+    def _wi_hook(mod, _p=_prev_wi):
+        if _p is not None:
+            _p(mod)
+        try:
+            _install_whichimpl(mod)
+        except Exception as exc:
+            print("[whichimpl] failed: %r" % (exc,), file=sys.stderr, flush=True)
+
+    _HOOKS["atom.model_ops.fused_moe_triton"] = _wi_hook
