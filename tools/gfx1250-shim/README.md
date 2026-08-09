@@ -75,11 +75,40 @@ Everything else -- the rope backward/THD variants, batched GEMMs, `gemm_a8w8`,
 `causal_conv1d`, `mhc_post`, `flash_attn_func`, the `*_smoothquant` and
 `*_dynamicquant` norms, `greedy_sample` -- is never reached by this model.
 
-All 15 are load-bearing: building each CK/HIP peer directly fails on gfx1250 with
-the same CK-tile arch gate (`config.hpp:577`; the supported list ends at
-gfx1201). The one near-miss is `module_rmsnorm`, which is hand-written HIP rather
-than CK-tile and does compile -- but `_use_hip_common()` dispatches to
-`add_rmsnorm` in `module_rmsnorm_quant`, which is CK-tile, so it is unreachable.
+All 15 are load-bearing *as aiter is currently built*: every CK/HIP peer fails on
+gfx1250 with the CK-tile arch gate (`config.hpp:577`; the supported list ends at
+gfx1201). `module_rmsnorm` is the near-miss -- hand-written HIP, it compiles --
+but `_use_hip_common()` dispatches to `add_rmsnorm` in `module_rmsnorm_quant`,
+which is CK-tile, so it is unreachable.
+
+### That gate is a build flag, not a property of the kernels
+
+The arch gate is not reached from the kernel bodies. Compiler-verified chain:
+
+    cache_pybind.cu:3 -> rocm_ops.hpp:5 -> aiter_tensor.h:4
+      -> aiter_hip_common.h:12 -> ck_tile/core.hpp -> static_assert
+
+and `aiter_hip_common.h` already has the escape:
+
+    #if !ENABLE_CK
+    #include "ck_tile_shim.h"
+    #else
+    #include "ck_tile/core.hpp"   // aiter's JIT hardcodes -DENABLE_CK=1
+    #endif
+
+Rebuilding with `-DENABLE_CK=0 --offload-arch=gfx1250` (drive the pre-generated
+`build.ninja` directly; this also sidesteps arch autodetection) produces a
+working `.so` for **six** of the seven modules behind the torch replicas:
+`module_cache`, `module_top_k_per_row`, `module_sample`, `module_mla_metadata`,
+`module_activation`, `module_quant`. Only `module_norm` still fails, and that one
+is a genuine CK-tile kernel (`LayerNormTypeConfig`, `layernorm2d_fwd_*`).
+
+Compiling is not the same as being correct -- none of these have been run, let
+alone validated numerically. But it means the torch replicas are a build-config
+problem, not a missing-kernel problem, and the cleanup path below should start
+there rather than with rewrites. Upstream is moving the same way: ROCm/aiter
+**#4214** ("fix gfx12 ENABLE_Ck0 cmp err") and **#2443** ("add enable_ck = 0 for
+dispatching") are both open as of 2026-08-09.
 
 Load-bearing lines: roughly 670 of 4,956 -- 1-66, `_make_custom_impls` (68-508),
 `_build_triton_index` (511-543), `_patch_aiter` (588-667), and the import hook
