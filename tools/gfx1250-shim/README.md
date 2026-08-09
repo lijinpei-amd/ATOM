@@ -37,18 +37,21 @@ Genuine torch/python fallbacks -- no native kernel exists:
 | --- | --- |
 | `top_k_per_row_prefill` / `_decode` | DSA indexer top-k. Hot: ~1.7% of device time. |
 | `concat_and_cache_mla` | MLA KV scatter. Only reached on the dense path (seq <= index_topk), which is why short prompts used to abort and long ones did not. |
-| `cp_gather_indexer_k_quant_cache` | gathers indexer KV out of the paged cache |
-| `get_mla_metadata_v1` | host-side scheduling metadata |
-| `greedy_sample`, `mixed_sample_outer_exponential` | sampling |
+| `indexer_k_quant_and_cache` | per-quant-block fp8 quant of the DSA indexer keys into the paged cache, MFMA 16x16 preshuffle included. 74 lines, the largest torch replica here. |
+| `cp_gather_indexer_k_quant_cache` | its inverse: paged cache -> contiguous `[T, D]` |
+| `get_mla_metadata_v1` | host-side scheduling metadata. A no-work stub: it zeroes the six indptr buffers, which is correct only because the sole consumer is `mla_decode_fwd` on the fp8 KV path and ours is bf16. |
+| `greedy_sample`, `mixed_sample_outer_exponential` | sampling. Only the latter is reached. |
 
 Marshalling adapters over real Triton/Gluon kernels -- these are *not* torch
 reimplementations:
 
 | op | routes to |
 | --- | --- |
-| `mla_prefill_asm_fwd` | `unified_attention_sparse_mla`; converts CSR top-k to dense `[T,K]` and re-views page_size=1 KV as 64-slot tiles |
+| `mla_prefill_asm_fwd` | `unified_attention_sparse_mla`; converts CSR top-k to dense `[T,K]` and re-views page_size=1 KV as 64-slot tiles. **Only under `GLM_TRITON_SPARSE_MLA=1`** -- the base entry in `_make_custom_impls` is a 91-line torch reference. |
 | `flash_attn_varlen_func` | Triton `mha`; drops the `min_seqlen_q` CK scheduler hint |
-| `indexer_k_quant_and_cache`, `rope_cached_positions_2c_fwd_inplace`, `dynamic_per_token_scaled_quant`, `silu_and_mul` | aiter Triton equivalents |
+| `rope_cached_positions_2c_fwd_inplace` | `rope_cached_thd_positions_2c_fwd_inplace`; squeezes (s,b,h,d) to THD |
+| `dynamic_per_token_scaled_quant` | `dynamic_per_token_quant_fp8_i8`; raises on the cases the peer lacks |
+| `silu_and_mul` | `fused_silu_mul` |
 
 Plus ~38 module-level redirects (rmsnorm, layernorm, rope, gemm_a8w8, batched
 GEMMs, mxfp4 quant, causal_conv1d) from the CK/HIP default to aiter Triton.
